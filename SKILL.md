@@ -16,16 +16,36 @@ long.
 
 ## Run it
 
+The scripts live next to this SKILL.md, not in the user's project, so always
+call them by the skill directory's absolute path. Write output to a temp
+directory rather than into the user's repo:
+
 ```bash
-python3 scripts/analyze.py RECORDING -o repro/
+OUT="$(mktemp -d)/repro"
+python3 "<this skill's directory>/scripts/analyze.py" RECORDING -o "$OUT"
 ```
 
-Then read `repro/timeline.md`. It embeds the key frames as relative image
+Then read `$OUT/timeline.md`. It embeds the key frames as relative image
 links — open them to see the UI.
 
 Requires `ffmpeg` and Python with `opencv-python` + `numpy`. Narration
 transcription additionally needs `openai-whisper`; without it the rest still
 works. Everything is local — no API key, no upload.
+
+### If the path is under `NSIRD_screencaptureui_`
+
+That is macOS's private folder for a recording whose floating thumbnail was
+dragged straight into the chat. Privacy protection blocks every other process
+from reading it, so it fails with "Operation not permitted" or "No such file"
+— retrying or escalating permissions will not help. Tell the user:
+
+- The recording has to be saved first. If the thumbnail is still on screen,
+  let it disappear (about 5 seconds) and it saves to the Desktop; then look
+  there by name (`mdfind -name "Screen Recording ..."`), since macOS puts a
+  narrow no-break space before AM/PM that pasting turns into a plain space.
+- If the thumbnail was dragged away, macOS hands the file over without saving
+  a copy, so it may be gone and needs re-recording.
+- To avoid it: Cmd+Shift+5 → Options → turn off "Show Floating Thumbnail".
 
 Useful flags:
 
