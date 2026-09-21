@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+Regression tests for the detectors.
+
+Every case here is a bug that actually shipped during development, so each
+one is worth keeping:
+
+  * the spinner vanished when deltas were measured on a downscaled frame
+  * the click was swallowed by the pointer run around it
+  * a compressed re-encode moved the reported hang five seconds late
+  * ...and reported it four times
+  * and the adaptive noise floor let a busy cell threshold itself away,
+    turning a hung spinner into "the screen was frozen"
+
+Run:  python3 tests/test_detection.py
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, os.path.join(ROOT, "scripts"))
+
+import events as E        # noqa: E402
+import report as R        # noqa: E402
+import signals as S       # noqa: E402
+
+SAMPLE = os.path.join(ROOT, "examples", "sample_bug.mp4")
+# Ground truth baked into examples/make_sample.py
+TRUE_SPIN_START, TRUE_SPIN_END = 3.30, 12.0
+TRUE_CLICK, TRUE_SCROLL_START = 3.00, 0.80
+TOL = 0.20
+
+FAILED: list = []
+
+
+def check(label: str, cond: bool, detail: str = "") -> None:
+    print(f"  {'PASS' if cond else 'FAIL'}  {label}" + (f"  -- {detail}" if detail and not cond else ""))
+    if not cond:
+        FAILED.append(label)
+
+
+def analyse(path: str):
+    sig = S.extract(path)
+    evs = E.coalesce(E.detect(sig))
+    return sig, evs, R.findings(evs, sig)
+
+
+def ensure_sample() -> None:
+    if not os.path.isfile(SAMPLE):
+        subprocess.run([sys.executable,
+                        os.path.join(ROOT, "examples", "make_sample.py"),
+                        SAMPLE], check=True)
+
+
+def reencode(src: str, dst: str, crf: int) -> None:
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", src,
+                    "-c:v", "libx264", "-crf", str(crf),
+                    "-pix_fmt", "yuv420p", dst], check=True)
+
+
+def synth(dst: str, filt: str, dur: str = "4") -> None:
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", filt, "-t", dur, "-r", "30",
+                    "-pix_fmt", "yuv420p", dst], check=True)
+
+
+def spins(evs):
+    return [e for e in evs if e.kind == "busy-indicator"]
+
+
+def hangs(notes) -> int:
+    """
+    Count hang findings.
+
+    Matching on the bare word "hang" looks fine and is not: "changed"
+    contains it, so every timeline that mentioned a change scored a hang.
+    """
+    return sum(n.lstrip("*").lower().startswith("likely hang") for n in notes)
+
+
+def test_clean() -> None:
+    print("clean recording")
+    _, evs, notes = analyse(SAMPLE)
+    sp = spins(evs)
+    check("exactly one busy-indicator", len(sp) == 1, f"got {len(sp)}")
+    if sp:
+        check("hang onset is accurate",
+              abs(sp[0].t0 - TRUE_SPIN_START) < TOL, f"t0={sp[0].t0:.2f}")
+        check("hang runs to end of recording",
+              abs(sp[0].t1 - TRUE_SPIN_END) < 0.5, f"t1={sp[0].t1:.2f}")
+    check("click survives the surrounding pointer motion",
+          any(e.kind in ("local-change", "region-change")
+              and abs(e.t0 - TRUE_CLICK) < TOL for e in evs))
+    check("scroll detected",
+          any(e.kind == "scroll" and abs(e.t0 - TRUE_SCROLL_START) < 0.3
+              for e in evs))
+    check("spinning UI is never called frozen",
+          not any(e.kind == "static" and e.t0 > TRUE_SPIN_START for e in evs))
+    check("a hang is reported", hangs(notes) >= 1)
+    check("the hang is reported once", hangs(notes) == 1)
+
+
+def test_compressed(tmp: str) -> None:
+    print("heavily compressed re-encode (crf 40)")
+    dst = os.path.join(tmp, "noisy.mp4")
+    reencode(SAMPLE, dst, 40)
+    _, evs, notes = analyse(dst)
+    sp = spins(evs)
+    check("still exactly one busy-indicator", len(sp) == 1, f"got {len(sp)}")
+    if sp:
+        check("onset still accurate under noise",
+              abs(sp[0].t0 - TRUE_SPIN_START) < TOL, f"t0={sp[0].t0:.2f}")
+    check("hang still reported exactly once", hangs(notes) == 1)
+
+
+def test_static(tmp: str) -> None:
+    print("entirely static recording")
+    dst = os.path.join(tmp, "static.mp4")
+    synth(dst, "color=c=white:s=640x480")
+    _, evs, notes = analyse(dst)
+    check("no busy-indicator invented", not spins(evs))
+    check("no hang claimed", hangs(notes) == 0)
+    check("says nothing happened",
+          any("nothing happened" in n.lower() for n in notes))
+
+
+def test_continuous_motion(tmp: str) -> None:
+    print("continuous full-frame motion")
+    dst = os.path.join(tmp, "motion.mp4")
+    synth(dst, "mandelbrot=s=480x320:rate=30")
+    _, evs, notes = analyse(dst)
+    check("no hang claimed on constant motion", hangs(notes) == 0)
+
+
+def test_signal_resolution() -> None:
+    print("small-motion sensitivity")
+    sig = S.extract(SAMPLE)
+    # The spinner is ~20px. If deltas were measured after downscaling it
+    # would read as zero here, which is the bug this asserts against.
+    mid = len(sig) // 2
+    check("a 20px spinner registers mid-hang",
+          sig.changed_px[mid] > 0, f"changed_px={sig.changed_px[mid]}")
+    check("truly static frames register zero",
+          sig.changed_px[5] == 0, f"changed_px={sig.changed_px[5]}")
+
+
+def main() -> int:
+    ensure_sample()
+    with tempfile.TemporaryDirectory() as tmp:
+        test_signal_resolution()
+        test_clean()
+        test_compressed(tmp)
+        test_static(tmp)
+        test_continuous_motion(tmp)
+    print()
+    if FAILED:
+        print(f"{len(FAILED)} check(s) failed: {', '.join(FAILED)}")
+        return 1
+    print("all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

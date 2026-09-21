@@ -1,0 +1,101 @@
+{
+  "video": "sample_bug.mp4",
+  "duration": 11.967,
+  "fps": 30.0,
+  "size": [
+    1280,
+    800
+  ],
+  "findings": [
+    "**Likely hang.** Something animated continuously in a small region, middle-right from 3.30s and was *still going when the recording ended* 8.7s later, with the rest of the screen frozen. It started 0.1s after a change at 3.20s, which is where the triggering interaction most likely is. Check the key frames to confirm it is a loading indicator."
+  ],
+  "events": [
+    {
+      "t0": 0.833,
+      "t1": 1.6,
+      "kind": "scroll",
+      "detail": "content scrolled down ~110px over 0.8s",
+      "region": null
+    },
+    {
+      "t0": 1.633,
+      "t1": 2.967,
+      "kind": "pointer",
+      "detail": "a small element moved across the screen from (34%,71%) to (81%,40%) - consistent with the mouse pointer",
+      "region": null
+    },
+    {
+      "t0": 3.0,
+      "t1": 3.0,
+      "kind": "local-change",
+      "detail": "0.82% of the screen changed (small region, middle-right) [77%,34% to 91%,41%]",
+      "region": [
+        0.7656,
+        0.345,
+        0.9073,
+        0.4067
+      ]
+    },
+    {
+      "t0": 3.2,
+      "t1": 3.2,
+      "kind": "local-change",
+      "detail": "0.81% of the screen changed (small region, middle-right) [77%,34% to 91%,41%]",
+      "region": [
+        0.7656,
+        0.345,
+        0.9073,
+        0.4067
+      ]
+    },
+    {
+      "t0": 3.3,
+      "t1": 11.967,
+      "kind": "busy-indicator",
+      "detail": "something animated continuously for 8.7s in a small region, middle-right while the rest of the screen was static [69%,30% to 75%,40%]",
+      "region": [
+        0.6875,
+        0.3,
+        0.75,
+        0.4
+      ]
+    }
+  ],
+  "frames": [
+    {
+      "t": 0.0,
+      "label": "first frame",
+      "path": "frames/t000_000.jpg"
+    },
+    {
+      "t": 0.833,
+      "label": "start of scroll (0.83s)",
+      "path": "frames/t000_833.jpg"
+    },
+    {
+      "t": 1.6,
+      "label": "end of scroll (1.60s)",
+      "path": "frames/t001_600.jpg"
+    },
+    {
+      "t": 2.95,
+      "label": "just before local-change at 3.00s",
+      "path": "frames/t002_950.jpg"
+    },
+    {
+      "t": 3.15,
+      "label": "just before local-change at 3.20s",
+      "path": "frames/t003_150.jpg"
+    },
+    {
+      "t": 3.3,
+      "label": "start of busy-indicator (3.30s)",
+      "path": "frames/t003_300.jpg"
+    },
+    {
+      "t": 11.967,
+      "label": "last frame",
+      "path": "frames/t011_967.jpg"
+    }
+  ]
+}

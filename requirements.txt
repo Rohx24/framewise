@@ -1,0 +1,6 @@
+# Core. Everything runs locally.
+numpy>=1.24
+opencv-python>=4.8
+
+# Optional: narration transcription (`--no-audio` skips it entirely).
+# openai-whisper>=20231117
