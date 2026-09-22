@@ -36,6 +36,10 @@ CROP_MIN_SPAN = 0.10     # never crop tighter than this much of the frame
 CROP_TARGET_W = 560      # upscale small crops to at least this wide
 
 INTERACTIONS = ("local-change", "region-change", "cut")
+# Anything that counts as the recording having caught *something*. Transients
+# and jank are consumed from the raw change events, so leaving them out here
+# reported a caught flicker as "nothing happened".
+ACTIVITY = INTERACTIONS + ("transient", "jank", "busy-indicator", "scroll")
 
 
 def findings(events: List[Event], sig: Signals) -> List[str]:
@@ -50,6 +54,26 @@ def findings(events: List[Event], sig: Signals) -> List[str]:
     end = sig.duration
 
     for ev in events:
+        if ev.kind == "transient":
+            frames = max(1, int(round(ev.duration * sig.fps)))
+            out.append(
+                f"**A state flashed by.** At {ev.t0:.2f}s a "
+                f"{describe_region(ev.region)} showed something for "
+                f"{ev.duration:.2f}s - {frames} frame"
+                f"{'s' if frames != 1 else ''} - before the screen moved on. "
+                f"Too brief to screenshot, and a viewer would register only "
+                f"that something flickered. The key frame labelled DURING is "
+                f"the only one showing what it was; read that one closely."
+            )
+
+        if ev.kind == "jank":
+            out.append(
+                f"**Motion stuttered.** Between {ev.t0:.2f}s and {ev.t1:.2f}s "
+                f"the screen moved unevenly rather than at a steady rate "
+                f"({ev.detail}). This is what 'it feels janky' looks like "
+                f"measured; individual frames look normal."
+            )
+
         if ev.kind == "busy-indicator" and ev.duration >= HANG_SECONDS:
             unresolved = (end - ev.t1) < 0.4
             prior = [e for e in events
@@ -87,7 +111,7 @@ def findings(events: List[Event], sig: Signals) -> List[str]:
                     f"but produced no further effect."
                 )
 
-    if not any(e.kind in INTERACTIONS for e in events):
+    if not any(e.kind in ACTIVITY for e in events):
         # Distinguish the two very different reasons a timeline comes back
         # thin. Telling a user their frozen recording "may be all motion" is
         # worse than saying nothing.
@@ -134,14 +158,25 @@ def select_keyframes(events: List[Event], sig: Signals,
     before/after pair for the same reason. Priority decides what survives
     the budget when a recording is busy.
     """
-    rank = {"cut": 0, "busy-indicator": 1, "region-change": 2,
-            "static": 3, "local-change": 4, "scroll": 5, "pointer": 6,
-            "flash": 2}
+    rank = {"transient": 0, "cut": 0, "busy-indicator": 1, "jank": 1,
+            "region-change": 2, "flash": 2, "static": 3, "local-change": 4,
+            "scroll": 5, "pointer": 6}
     cand: List[Tuple[int, float, str, Optional[tuple]]] = []
     eps = 1.5 / sig.fps
 
     for ev in events:
         r = rank.get(ev.kind, 7)
+        if ev.kind == "transient":
+            # The frame in the middle is the whole point: it is the only one
+            # showing the state that flashed. Boundaries alone would give a
+            # before and an after that look identical, which is exactly why
+            # nobody can screenshot this class of bug.
+            cand.append((r, max(0.0, ev.t0 - eps), "before the flash", ev.region))
+            cand.append((r, (ev.t0 + ev.t1) / 2,
+                         f"DURING the flash at {ev.t0:.2f}s - the state that "
+                         f"appeared briefly", ev.region))
+            cand.append((r, ev.t1 + eps, "after it reverted", ev.region))
+            continue
         if ev.instant:
             # The frame before carries the same region, so the pair reads as
             # a before/after of one place rather than two unrelated shots.

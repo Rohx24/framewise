@@ -30,8 +30,21 @@ FLOW_WIDTH = 240
 GRID_COLS = 16
 GRID_ROWS = 10
 
+# A tiny grayscale thumbnail is kept for every frame. Consecutive deltas
+# alone cannot answer "did the screen go back to how it was?", which is the
+# whole question behind a flicker -- that needs comparing two frames that
+# are not next to each other. At this size a ten-minute recording costs
+# about 130MB of RAM.
+THUMB_W, THUMB_H = 64, 40
+
 # A pixel counts as "changed" above this 0-255 delta. Tuned to sit above
 # h.264 ringing and subpixel antialiasing shimmer.
+#
+# The delta is the largest change across the three colour channels, not a
+# change in brightness. Red (224,75,74) and green (32,160,110) differ by
+# about 3 in luminance, so a grayscale pipeline cannot see an error banner
+# turn into a success banner -- which is the single most meaningful colour
+# change a UI makes.
 PIXEL_DELTA = 12
 
 
@@ -53,6 +66,7 @@ class Signals:
     centroid: np.ndarray       # (N,2)    x,y of change centre, normalised
     shift: np.ndarray          # (N,2)    estimated dx,dy translation, px
     luma: np.ndarray           # (N,)     mean brightness, 0-255
+    thumb: np.ndarray          # (N,h,w,3) tiny colour frame, for A/B compare
 
     def __len__(self) -> int:
         return len(self.t)
@@ -120,6 +134,7 @@ def extract(path: str, max_seconds: Optional[float] = None) -> Signals:
     centroids: List[tuple] = []
     shifts: List[tuple] = []
     lumas: List[float] = []
+    thumbs: List[np.ndarray] = []
 
     prev: Optional[np.ndarray] = None
     prev_flow: Optional[np.ndarray] = None
@@ -149,8 +164,9 @@ def extract(path: str, max_seconds: Optional[float] = None) -> Signals:
             centroids.append((0.0, 0.0))
             shifts.append((0.0, 0.0))
         else:
-            # Delta at work resolution, reduced only afterwards.
-            delta = cv2.absdiff(gray, prev)
+            # Delta at work resolution, reduced only afterwards, and taken
+            # across colour channels rather than on brightness.
+            delta = cv2.absdiff(work, prev).max(axis=2)
             mask = delta > PIXEL_DELTA
             cells = _grid_count(mask)
             bbox, centroid = _extent(mask)
@@ -169,9 +185,11 @@ def extract(path: str, max_seconds: Optional[float] = None) -> Signals:
                 dx, dy = 0.0, 0.0
             shifts.append((float(dx) / fscale, float(dy) / fscale))
 
+        thumbs.append(cv2.resize(work, (THUMB_W, THUMB_H),
+                                 interpolation=cv2.INTER_AREA))
         lumas.append(float(gray.mean()))
         t.append(ts)
-        prev, prev_flow = gray, flow_f32
+        prev, prev_flow = work, flow_f32
         idx += 1
 
     cap.release()
@@ -195,4 +213,5 @@ def extract(path: str, max_seconds: Optional[float] = None) -> Signals:
         centroid=np.asarray(centroids, dtype=np.float32),
         shift=np.asarray(shifts, dtype=np.float32),
         luma=np.asarray(lumas, dtype=np.float32),
+        thumb=np.stack(thumbs),
     )

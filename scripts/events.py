@@ -33,6 +33,13 @@ POINTER_MIN_TRAVEL = 0.03  # net displacement before we call it movement
 SCROLL_DY = 1.5          # px of vertical translation per frame
 LUMA_JUMP = 12.0         # brightness step that reads as a flash
 
+TRANSIENT_MAX = 0.60     # a change that reverts slower than this is a real state
+TRANSIENT_MIN_FRAMES = 1 # at least one frame showing the other state
+
+JANK_MIN_BREAKS = 3      # irregular frames before motion counts as stuttering
+JANK_STALL = 0.3         # of the run's typical step: below this is a stall
+JANK_JUMP = 2.5          # above this is a lurch
+
 MIN_SUSTAINED = 0.7      # seconds before a sustained pattern is an event
 MIN_STALL = 1.0          # seconds of stillness worth reporting
 ACTIVITY_RATIO = 0.55    # fraction of a window a cell must be active
@@ -322,12 +329,129 @@ def detect(sig: Signals) -> List[Event]:
             f"({sig.luma[i-1]:.0f} to {sig.luma[i]:.0f})",
         ))
 
+    events = _find_transients(events, sig)
+    events += _find_jank(events, sig)
+
     sustained = [e for e in events
                  if e.kind in ("busy-indicator", "static", "scroll")]
     rest = [e for e in events if e not in sustained]
     events = _merge_sustained(sustained) + rest
     events.sort(key=lambda e: (e.t0, e.t1))
     return events
+
+
+def _thumb_diff(sig: Signals, i: int, j: int) -> float:
+    """Mean absolute difference between two frames, anywhere in the video."""
+    n = len(sig)
+    i, j = max(0, min(n - 1, i)), max(0, min(n - 1, j))
+    a = sig.thumb[i].astype(np.float32)
+    b = sig.thumb[j].astype(np.float32)
+    return float(np.abs(a - b).mean())
+
+
+def _find_transients(events: List[Event], sig: Signals) -> List[Event]:
+    """
+    Find brief intermediate states: a flash of something that was not the
+    before and was not the after either.
+
+    This is the class of bug a person cannot report. It is over in a few
+    frames, so it cannot be screenshotted, and it leaves them saying only
+    "something flickered" because they never saw what it was.
+
+    The test is deliberately not "did the screen go back". An error banner
+    that shows for three frames before the success banner never goes back --
+    it settles somewhere new, and requiring a revert misses it entirely.
+    What all of these share is a middle that differs from *both* ends, which
+    consecutive frame deltas cannot express at all: it needs two frames that
+    are not adjacent to be compared.
+    """
+    n = len(sig)
+    consecutive = np.array(
+        [_thumb_diff(sig, i - 1, i) for i in range(1, min(n, 400))],
+        dtype=np.float32) if n > 1 else np.zeros(1, dtype=np.float32)
+    base = float(np.median(consecutive)) if consecutive.size else 0.0
+    revert_max = max(1.2, base * 3.0)     # "back to how it was"
+    differ_min = max(2.0, base * 6.0)     # "visibly something else"
+
+    idx = lambda t: int(round(t * sig.fps))                        # noqa: E731
+    instants = [e for e in events
+                if e.instant and e.kind in ("local-change", "region-change", "cut")]
+
+    consumed, found = set(), []
+    for a in range(len(instants)):
+        e1 = instants[a]
+        if id(e1) in consumed:
+            continue
+        for b in range(a + 1, len(instants)):
+            e2 = instants[b]
+            if id(e2) in consumed:
+                continue
+            gap = e2.t0 - e1.t0
+            if gap <= 0 or gap > TRANSIENT_MAX:
+                break
+            i1, i2 = idx(e1.t0), idx(e2.t0)
+            if i2 - i1 < TRANSIENT_MIN_FRAMES:
+                continue
+            before, after = i1 - 2, i2 + 2
+            during = (i1 + i2) // 2
+            reverted = _thumb_diff(sig, before, after) <= revert_max
+            if (_thumb_diff(sig, before, during) >= differ_min
+                    and _thumb_diff(sig, during, after) >= differ_min):
+                region = e1.region or e2.region
+                if e1.region and e2.region:
+                    region = (min(e1.region[0], e2.region[0]),
+                              min(e1.region[1], e2.region[1]),
+                              max(e1.region[2], e2.region[2]),
+                              max(e1.region[3], e2.region[3]))
+                tail = ("and went back to how it started" if reverted
+                        else "then settled into a third, different state")
+                found.append(Event(
+                    e1.t0, e2.t0, "transient",
+                    f"a {describe_region(region)} showed something for only "
+                    f"{gap:.2f}s ({int(round(gap * sig.fps))} frames) {tail} "
+                    f"{_pct(region)}",
+                    region,
+                ))
+                consumed.add(id(e1))
+                consumed.add(id(e2))
+                break
+
+    return [e for e in events if id(e) not in consumed] + found
+
+
+def _find_jank(events: List[Event], sig: Signals) -> List[Event]:
+    """
+    Find motion that does not advance evenly.
+
+    Smooth scrolling moves by a similar amount every frame. Stutter shows up
+    as frames that barely move followed by frames that lurch. A person can
+    only report this as "it feels janky", and a screenshot of a stutter is
+    indistinguishable from a screenshot of smooth motion.
+    """
+    out: List[Event] = []
+    idx = lambda t: int(round(t * sig.fps))                        # noqa: E731
+
+    for ev in events:
+        if ev.kind != "scroll" or ev.duration < 0.4:
+            continue
+        a, b = idx(ev.t0), idx(ev.t1) + 1
+        steps = np.abs(sig.shift[a:b, 1])
+        if steps.size < 6:
+            continue
+        typical = float(np.median(steps))
+        if typical < 1.0:
+            continue
+        stalls = int((steps < typical * JANK_STALL).sum())
+        jumps = int((steps > typical * JANK_JUMP).sum())
+        if stalls + jumps < JANK_MIN_BREAKS:
+            continue
+        out.append(Event(
+            ev.t0, ev.t1, "jank",
+            f"motion advanced unevenly: of {steps.size} frames, {stalls} "
+            f"barely moved and {jumps} lurched, against a typical step of "
+            f"{typical:.0f}px",
+        ))
+    return out
 
 
 MERGEABLE = ("local-change", "region-change", "flash", "pointer")
