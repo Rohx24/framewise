@@ -21,7 +21,7 @@ motion, so screenshots leave duration, distance and easing to guesswork.
 ## Install
 
 ```bash
-git clone https://github.com/YOURNAME/framewise
+git clone https://github.com/Rohx24/framewise
 cd framewise && pip install -r requirements.txt && ./install.sh
 ```
 
