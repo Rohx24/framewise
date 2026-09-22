@@ -71,6 +71,10 @@ class Signals:
     def __len__(self) -> int:
         return len(self.t)
 
+    def index_at(self, seconds: float) -> int:
+        """Frame index nearest a timestamp, honouring variable frame rate."""
+        return int(np.abs(self.t - seconds).argmin())
+
     @property
     def duration(self) -> float:
         return float(self.t[-1]) if len(self.t) else 0.0
@@ -126,6 +130,7 @@ def extract(path: str, max_seconds: Optional[float] = None) -> Signals:
     total_px = float(ww * wh)
 
     t: List[float] = []
+    pts_ok = True
     changed_px: List[float] = []
     energy: List[float] = []
     peak: List[float] = []
@@ -144,7 +149,16 @@ def extract(path: str, max_seconds: Optional[float] = None) -> Signals:
         ok, frame = cap.read()
         if not ok:
             break
-        ts = idx / fps
+
+        # Real presentation timestamp, not index/fps. Screen recordings are
+        # variable frame rate -- macOS emits a frame when the screen changes,
+        # so gaps range from 7ms to 80ms in the same file. Assuming a
+        # constant rate slides every reported time away from where the thing
+        # being reported actually happened.
+        pts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+        if pts_ok and (pts <= 0 or (t and pts <= t[-1])):
+            pts_ok = False          # container has no usable timestamps
+        ts = pts if pts_ok else idx / fps
         if max_seconds is not None and ts > max_seconds:
             break
 
@@ -197,9 +211,16 @@ def extract(path: str, max_seconds: Optional[float] = None) -> Signals:
     if not t:
         raise RuntimeError(f"no frames decoded from {path}")
 
+    times = np.asarray(t, dtype=np.float64)
+    # Effective rate, used for window sizes. The container's declared fps is
+    # unreliable on variable-rate files.
+    span = float(times[-1] - times[0])
+    if span > 0 and len(times) > 1:
+        fps = (len(times) - 1) / span
+
     cpx = np.asarray(changed_px, dtype=np.float32)
     return Signals(
-        t=np.asarray(t, dtype=np.float64),
+        t=times,
         fps=fps,
         width=native_w,
         height=native_h,

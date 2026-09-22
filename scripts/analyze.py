@@ -96,7 +96,8 @@ def main() -> int:
 
     os.makedirs(args.out, exist_ok=True)
     frames = rep.extract_frames(args.video, stamps,
-                                os.path.join(args.out, "frames"))
+                                os.path.join(args.out, "frames"),
+                                times=sig.t)
     print(f"  {len(frames)} key frames", file=sys.stderr)
 
     transcript = None

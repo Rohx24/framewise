@@ -12,6 +12,7 @@ import os
 from typing import List, Optional, Tuple
 
 import cv2
+import numpy as np
 
 from events import Event, describe_region
 from signals import Signals
@@ -241,20 +242,40 @@ def _crop(frame, region: Optional[tuple]):
 
 
 def extract_frames(path: str, stamps: List[Tuple[float, str, Optional[tuple]]],
-                   outdir: str) -> List[Tuple[float, str, str, Optional[str]]]:
-    """Write the chosen frames as JPEGs. Returns (t, label, relpath, croppath)."""
+                   outdir: str, times=None
+                   ) -> List[Tuple[float, str, str, Optional[str]]]:
+    """
+    Write the chosen frames as JPEGs. Returns (t, label, relpath, croppath).
+
+    Frames are found by walking the file rather than by seeking to t * fps.
+    On a variable-rate recording that multiplication lands on the wrong
+    frame, which for a three-frame flash means extracting a frame that does
+    not contain the thing the report is pointing at.
+    """
     os.makedirs(outdir, exist_ok=True)
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
         raise RuntimeError(f"could not open video: {path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     written: List[Tuple[float, str, str, Optional[str]]] = []
 
+    wanted = {}
     for t, label, region in stamps:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(round(t * fps))))
+        i = (int(np.abs(np.asarray(times) - t).argmin()) if times is not None
+             else int(round(t * (cap.get(cv2.CAP_PROP_FPS) or 30.0))))
+        wanted.setdefault(i, (t, label, region))
+
+    grabbed, i = {}, 0
+    while wanted and i <= max(wanted):
         ok, frame = cap.read()
         if not ok:
-            continue
+            break
+        if i in wanted:
+            grabbed[i] = frame.copy()
+        i += 1
+
+    for i in sorted(grabbed):
+        t, label, region = wanted[i]
+        frame = grabbed[i]
 
         # Crop from the full-resolution frame, before any downscaling --
         # magnifying an already-shrunk frame just magnifies the blur.

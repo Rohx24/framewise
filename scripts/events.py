@@ -36,6 +36,8 @@ LUMA_JUMP = 12.0         # brightness step that reads as a flash
 
 TRANSIENT_MAX = 0.60     # a change that reverts slower than this is a real state
 TRANSIENT_MIN_FRAMES = 1 # at least one frame showing the other state
+TRANSIENT_SETTLE = 0.10  # seconds of stillness required on each side
+TRANSIENT_STABLE = 0.02  # fraction of screen that may change and still count
 
 JANK_MIN_BREAKS = 3      # irregular frames before motion counts as stuttering
 JANK_STALL = 0.3         # of the run's typical step: below this is a stall
@@ -336,7 +338,11 @@ def detect(sig: Signals) -> List[Event]:
             f"({sig.luma[i-1]:.0f} to {sig.luma[i]:.0f})",
         ))
 
-    events = _find_transients(events, sig)
+    # Pointer motion is deliberately not disqualifying here: the cursor is
+    # almost always moving when a click causes a flash, and treating that as
+    # "busy" rejected every real candidate. Only whole-screen motion and
+    # running animations make a flash impossible to isolate.
+    events = _find_transients(events, sig, scrolling | spinning)
     events += _find_jank(events, sig)
 
     sustained = [e for e in events
@@ -356,7 +362,8 @@ def _thumb_diff(sig: Signals, i: int, j: int) -> float:
     return float(np.abs(a - b).mean())
 
 
-def _find_transients(events: List[Event], sig: Signals) -> List[Event]:
+def _find_transients(events: List[Event], sig: Signals,
+                     busy: np.ndarray) -> List[Event]:
     """
     Find brief intermediate states: a flash of something that was not the
     before and was not the after either.
@@ -380,27 +387,61 @@ def _find_transients(events: List[Event], sig: Signals) -> List[Event]:
     revert_max = max(1.2, base * 3.0)     # "back to how it was"
     differ_min = max(2.0, base * 6.0)     # "visibly something else"
 
-    idx = lambda t: int(round(t * sig.fps))                        # noqa: E731
+    idx = sig.index_at
+
+    # A flash only means anything if the screen had settled either side of
+    # it. Without this, continuous motion is one unbroken run of transients:
+    # while a page scrolls, every single frame differs from the frame before
+    # it and from the frame after it, so the test fires on all of them and
+    # buries the real finding under dozens of whole-screen false positives.
+    stable = (sig.changed_frac < TRANSIENT_STABLE) & ~busy
+    settle = max(2, int(round(sig.fps * TRANSIENT_SETTLE)))
+
+    def settled_before(i: int) -> bool:
+        lo = max(0, i - settle - 1)
+        return bool(stable[lo:max(lo + 1, i - 1)].all())
+
+    def settled_after(i: int) -> bool:
+        hi = min(len(sig), i + settle + 2)
+        return bool(stable[min(i + 2, len(sig) - 1):hi].all())
+
     instants = [e for e in events
                 if e.instant and e.kind in ("local-change", "region-change", "cut")]
 
-    consumed, found = set(), []
+    # Collect every valid pair, then choose. Taking the first match and
+    # moving on meant the widest pair won -- the click and the settled state
+    # half a second later -- which spans the flash instead of isolating it.
+    cands = []
     for a in range(len(instants)):
         e1 = instants[a]
-        if id(e1) in consumed:
-            continue
         for b in range(a + 1, len(instants)):
             e2 = instants[b]
-            if id(e2) in consumed:
-                continue
             gap = e2.t0 - e1.t0
             if gap <= 0 or gap > TRANSIENT_MAX:
                 break
             i1, i2 = idx(e1.t0), idx(e2.t0)
             if i2 - i1 < TRANSIENT_MIN_FRAMES:
                 continue
+            if busy[i1:i2 + 1].any():
+                continue
+            if not (settled_before(i1) and settled_after(i2)):
+                continue
+            # The state that flashed has to have been *displayed*, not
+            # animated. A scroll that starts and stops inside the window
+            # also has a still frame either side and a different-looking
+            # middle, and is otherwise indistinguishable from a flash.
+            span = i2 - i1
+            if span > 2 and int((~stable[i1 + 1:i2]).sum()) > max(1, span // 4):
+                continue
             before, after = i1 - 2, i2 + 2
             during = (i1 + i2) // 2
+            # The flashed state has to hold still while it is up. Slow
+            # continuous drift -- a long cursor drag, a lazy settle -- never
+            # moves much in any one frame, so every frame reads as stable,
+            # yet the drift accumulates until the middle differs from both
+            # ends and a half-second of creep is reported as a flash.
+            if _thumb_diff(sig, i1 + 1, max(i1 + 1, i2 - 1)) > revert_max:
+                continue
             reverted = _thumb_diff(sig, before, after) <= revert_max
             if (_thumb_diff(sig, before, during) >= differ_min
                     and _thumb_diff(sig, during, after) >= differ_min):
@@ -412,18 +453,24 @@ def _find_transients(events: List[Event], sig: Signals) -> List[Event]:
                               max(e1.region[3], e2.region[3]))
                 tail = ("and went back to how it started" if reverted
                         else "then settled into a third, different state")
-                found.append(Event(
+                cands.append((Event(
                     e1.t0, e2.t0, "transient",
                     f"a {describe_region(region)} showed something for only "
                     f"{gap:.2f}s ({int(round(gap * sig.fps))} frames) {tail} "
                     f"{_pct(region)}",
                     region,
-                ))
-                consumed.add(id(e1))
-                consumed.add(id(e2))
-                break
+                ), e1, e2))
 
-    return [e for e in events if id(e) not in consumed] + found
+    # Tightest first, skipping anything that overlaps one already taken.
+    consumed, kept = set(), []
+    for ev, e1, e2 in sorted(cands, key=lambda c: c[0].duration):
+        if any(ev.t0 < k.t1 and k.t0 < ev.t1 for k in kept):
+            continue
+        kept.append(ev)
+        consumed.add(id(e1))
+        consumed.add(id(e2))
+
+    return [e for e in events if id(e) not in consumed] + kept
 
 
 def _find_jank(events: List[Event], sig: Signals) -> List[Event]:
@@ -436,7 +483,7 @@ def _find_jank(events: List[Event], sig: Signals) -> List[Event]:
     indistinguishable from a screenshot of smooth motion.
     """
     out: List[Event] = []
-    idx = lambda t: int(round(t * sig.fps))                        # noqa: E731
+    idx = sig.index_at
 
     for ev in events:
         if ev.kind != "scroll" or ev.duration < 0.4:
