@@ -221,6 +221,56 @@ def test_segmentation(tmp: str) -> None:
           all(not (g["t0"] < 2.05 < g["t1"]) for g in states))
 
 
+def test_motion_recovery() -> None:
+    print("recovering a known animation")
+    import numpy as np
+    import measure as M
+    import replicate as R
+    clip = os.path.join(ROOT, "examples", "sample_motion.mp4")
+    if not os.path.isfile(clip):
+        subprocess.run([sys.executable,
+                        os.path.join(ROOT, "examples", "make_motion_sample.py"),
+                        clip], check=True)
+    # Ground truth baked into make_motion_sample.py: a circle scaling on a
+    # cubic ease-out, 600ms, starting at 1.0s.
+    sig = S.extract(clip)
+    segs = R.dedupe_states(sig, R.segment(sig))
+    moves = [g for g in segs if g["kind"] == "transition"]
+    check("one transition found", len(moves) == 1, f"got {len(moves)}")
+    if not moves:
+        return
+    mv = moves[0]
+    check("transition starts on time", abs(mv["t0"] - 1.0) < 0.12,
+          f"t0={mv['t0']:.2f}")
+    # An ease-out's last frames move sub-pixel, so some tail is always lost.
+    # Losing more than a third of it means the hysteresis has regressed and
+    # the curve will read as linear.
+    dur = mv["t1"] - mv["t0"]
+    check("most of the duration is captured", 0.40 <= dur <= 0.75,
+          f"{dur:.2f}s of 0.60s")
+
+    idxs = sorted({sig.index_at(t)
+                   for t in np.linspace(mv["t0"], mv["t1"], 24)})
+    got = R.grab(clip, idxs)
+    region = R.effect_region(sig, mv["i0"], mv["i1"])
+    h, w = got[idxs[0]].shape[:2]
+    x0, y0 = int(region[0] * w), int(region[1] * h)
+    x1, y1 = int(region[2] * w), int(region[3] * h)
+    crops = [got[i][y0:y1, x0:x1] for i in idxs if i in got]
+    met = M.measure_frames(crops, [float(sig.t[i]) for i in idxs if i in got])
+    fits = M.fit_easing([m.scale for m in met])
+    check("scale grows from near nothing", met[0].scale < 0.1,
+          f"start scale {met[0].scale:.3f}")
+    check("a decelerating curve is identified",
+          fits and fits[0][0] in ("ease-out", "cubic-out", "quad-out",
+                                  "quart-out", "expo-out", "circ-out"),
+          f"got {fits[0][0] if fits else None}")
+    check("and it fits closely", fits and fits[0][1] < 0.06,
+          f"rmse {fits[0][1]:.3f}" if fits else "no fit")
+    check("linear is rejected",
+          fits and dict(fits)["linear"] > fits[0][1] * 2)
+
+
 def main() -> int:
     ensure_sample()
     with tempfile.TemporaryDirectory() as tmp:
@@ -232,6 +282,7 @@ def main() -> int:
         test_continuous_motion(tmp)
         test_easing_fit()
         test_segmentation(tmp)
+        test_motion_recovery()
     print()
     if FAILED:
         print(f"{len(FAILED)} check(s) failed: {', '.join(FAILED)}")

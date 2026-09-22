@@ -1,120 +1,159 @@
-# watch + replicate
+# framewise
 
-**Make coding agents able to read video.**
+Coding agents can't read video. These two skills let them.
 
-Two commands over one codebase:
+| | |
+| --- | --- |
+| **`/watch`** | Find what broke in a screen recording, with timestamps. |
+| **`/replicate`** | Take an interface apart so it can be rebuilt — layouts, plus motion measured frame by frame. |
 
-- **`/watch`** — find bugs in a screen recording. What broke, and when.
-- **`/replicate`** — take an interface apart so it can be rebuilt. States,
-  transitions, and the motion measured frame by frame.
+Runs locally. No API key, no upload.
 
-Someone hands you a `.mov` and says "it breaks at 0:14". Your agent can't
-watch it, so you transcribe it into prose by hand and lose half the detail.
+## Why
 
-`watch` turns the recording into a timestamped timeline plus a handful
-of key frames — something any model with vision can actually read.
+Sampling screenshots every second loses the thing you needed. A screenshot
+shows a spinner exists; it can't show that it never stopped, which is the
+bug. Duration is the finding.
 
-```
-| `3.00s`          | local-change    | 0.82% of the screen changed (small region, middle-right)
-| `3.30s - 11.97s` | busy-indicator  | something animated continuously for 8.7s while the
-                                       rest of the screen was static
-```
-
-> **Likely hang.** Something animated continuously in a small region,
-> middle-right from 3.30s and was *still going when the recording ended*
-> 8.7s later, with the rest of the screen frozen. It started 0.1s after a
-> change at 3.20s, which is where the triggering interaction most likely is.
-
-## Why not just take screenshots
-
-Because the answer is usually in the gaps. A screenshot every second tells
-you a spinner exists; it can't tell you the spinner never stopped, which is
-the entire bug. Duration *is* the finding.
-
-Sampling also silently loses small things. Measuring change on a downscaled
-frame averages a 20px spinner into nothing — the first version of this tool
-confidently reported a hung UI as "completely static". Deltas are computed at
-full resolution here and only summarised afterwards.
-
-The same trap has a second form, and it is subtler. Learning a per-cell noise
-floor over time seems obviously right, until you notice that a spinner
-occupying its cell 72% of the time pushes its own percentile up into its own
-signal and thresholds itself out of existence — reporting the hang, again, as
-a frozen screen. The floor here is the *spatial* median within each frame: in
-any single frame of a screen recording nearly every cell is static, so one
-busy cell cannot move it. Both failures are in the test suite.
-
-## How it works
-
-Three layers, cheap to expensive:
-
-1. **Signals** — decode every frame once, diff at full resolution, reduce to
-   per-frame time series (changed pixels, where, translation, brightness).
-   No ML. Pure numpy.
-2. **Events** — segment those signals into bounded events. A spinner and a
-   mouse cursor are both one small busy region; what separates them is that
-   only one of them travels.
-3. **Report** — findings, a key-frame budget, and a Markdown artifact.
-
-The model only ever sees step 3. A 12-second recording becomes 5 events and
-7 frames instead of 360 images.
-
-Nothing in the pipeline interprets meaning — it reports what changed, where
-and for how long. Calling it a failed save request is the reading model's
-job, and keeping that boundary is what stops it inventing a story.
+Rebuilding has the same problem in reverse. A still frame can't contain
+motion, so screenshots leave duration, distance and easing to guesswork.
 
 ## Install
 
 ```bash
-git clone https://github.com/YOURNAME/claude-watch
-cd claude-watch && pip install -r requirements.txt && ./install.sh
+git clone https://github.com/YOURNAME/framewise
+cd framewise && pip install -r requirements.txt && ./install.sh
 ```
 
-That installs both `/watch` and `/replicate`.
+Needs `ffmpeg` on PATH. Installs `/watch` and `/replicate`.
 
-Needs `ffmpeg` on PATH. Optional: `pip install openai-whisper` to transcribe
-narration — people say "and now it just hangs" out loud, and that is often
-the most informative thing in the recording.
-
-## Use
-
-```bash
-python3 scripts/analyze.py bug.mov -o repro/
-```
-
-Writes `repro/timeline.md`, `repro/frames/`, `repro/events.json`.
-
-Installed at `~/.claude/skills/watch/` it triggers on its own whenever a recording comes up. It is plain Markdown
-and images, so it works just as well pasted into any other assistant.
-
-## A page to record
-
-`examples/demo-page.html` is a deliberately faulty settings form, for trying
-the skill on a real recording rather than a synthetic one. It has two planted
-bugs: the country dropdown opens 1.4s after the click with nothing but a focus
-ring in the meantime, and the menu is anchored 7px left of its trigger.
-
-One is temporal and one is spatial, which is the point — the timeline catches
-the stall, and the magnified crop of the changed region is what makes a 7px
-offset visible at all.
-
-## Try it without a recording
+Try it without a recording:
 
 ```bash
 python3 examples/make_sample.py examples/sample_bug.mp4
 python3 scripts/analyze.py examples/sample_bug.mp4 -o /tmp/demo --no-audio
 ```
 
-Renders a synthetic hung-save bug and analyses it. Sample output is in
-[`examples/expected/`](examples/expected/timeline.md).
+## /watch
 
-## Performance
+360 frames become 5 events and 7 key frames:
 
-A 2-minute 1080p recording analyses in about 20 seconds on a laptop — roughly
-6× faster than watching it, and resolution barely matters because decoding
-dominates. Transcription adds a few seconds.
+```
+| 3.00s          | local-change    | 0.82% of the screen changed (small region, middle-right)
+| 3.30s - 11.97s | busy-indicator  | something animated continuously for 8.7s while the
+                                     rest of the screen was static
+```
 
-Output is small on purpose: that recording yields ~12 key frames, not 3,600.
+> **Likely hang.** Something animated continuously from 3.30s and was still
+> going when the recording ended 8.7s later, with the rest of the screen
+> frozen. It started 0.1s after a change at 3.20s.
+
+Event kinds are visual patterns, not diagnoses:
+
+| kind | pattern | usually |
+| --- | --- | --- |
+| `busy-indicator` | one small area animates, all else still | spinner, progress bar |
+| `transient` | a state appears for a few frames, then moves on | flash of an error or stale value |
+| `jank` | motion advances unevenly | dropped frames |
+| `static` | not one pixel changed for over a second | frozen UI |
+| `scroll` / `pointer` | frame translation / cursor-sized thing moving | scrolling, mouse |
+| `local-change` / `region-change` / `cut` | small / large / near-total repaint | click, modal, navigation |
+| `flash` | global brightness step | theme flip, unstyled flash |
+
+`transient` and `jank` cover the bugs nobody can report — a three-frame
+flicker can't be screenshotted, and jank can only be described as "it feels
+bad".
+
+Key frames include a magnified crop of the changed region, cut from the
+full-resolution frame before downscaling.
+
+## /replicate
+
+A recording is states and transitions, and they need different treatment.
+
+- **States** — layouts it rests in. One full-resolution frame plus a hex
+  palette.
+- **Transitions** — sampled densely and measured: scale, centre,
+  brightness, coverage, sharpness, edge colour separation per frame, with a
+  CSS `cubic-bezier` fitted.
+
+```bash
+python3 scripts/replicate.py clip.mov -o rebuild/
+python3 scripts/replicate.py clip.mov --from 6.3 --to 7.3 -o rebuild/
+```
+
+`examples/make_motion_sample.py` renders a circle scaling on a cubic
+ease-out over 600ms. `replicate` isn't told:
+
+```
+### Transition 0 — 1.02s to 1.52s (500ms)
+- Scale (subject area, 1.0 = largest seen) — 0.019 to 1
+  - best easing `ease-out` = `cubic-bezier(0.0, 0.0, 0.58, 1.0)` (rmse 0.033, close fit)
+```
+
+Right family and magnitude, a neighbouring curve rather than the exact one.
+The missing 100ms is real: the tail of an ease-out moves sub-pixel amounts.
+Both facts are asserted in the tests, including that `linear` is rejected.
+
+When no easing fits any channel, the report says so — that means staged
+keyframes, a spring, or per-frame shader work, and no single tween will
+match.
+
+Edge colour separation indicates refraction. CSS doesn't split red from blue
+at an edge; shaders do.
+
+## How it works
+
+```
+  video
+    │
+    ├─ 1. signals ── decode once, diff at full resolution, reduce to
+    │                per-frame series. numpy, no ML.
+    │                changed pixels · where · translation · brightness
+    │
+    ├─ 2a. events ──── bounded events                     →  /watch
+    │
+    └─ 2b. measure ─── states + transitions, easing fit   →  /replicate
+                              │
+                              ▼
+                    3. markdown + frames
+                              │
+                              ▼
+                       4. the model reads it
+```
+
+Steps 1–3 are arithmetic, which is why the timestamps hold up. Step 4 is the
+only place meaning is assigned. The pipeline reports what changed, where and
+for how long; both skills carry a rule against naming a mechanism that
+wasn't measured, since a scale curve looks the same from CSS, a spring or a
+vertex shader.
+
+## Three traps, all of which shipped here first
+
+**Measure change before summarising.** Downscaling and then diffing averages
+a 20px spinner to nothing. The first version reported a hung UI as
+"completely static".
+
+**A busy region can threshold itself out.** A per-cell noise floor learned
+over time lets a spinner occupying its cell 72% of the time push its own
+percentile into its own signal. The floor is the spatial median within each
+frame instead — one busy cell can't move it.
+
+**Screen recordings are variable frame rate.** Gaps in one file ranged from
+7ms to 83ms, 148 of 412 more than 30% off the median. `index / fps` slides
+every timestamp, and seeking that way extracts the wrong frames.
+
+Colour matters too: red `(224,75,74)` and green `(32,160,110)` differ by
+about 3 in luminance, so a grayscale pipeline can't see an error banner
+become a success banner. Deltas compare colour channels.
+
+## Output
+
+Plain Markdown plus JPEGs, carrying their own reading instructions. Works in
+any assistant with vision. `events.json` holds the same data for scripts.
+
+A 2-minute 1080p recording takes about 20 seconds — roughly 6× faster than
+watching it. Decoding dominates, so resolution barely matters.
 
 ## Tests
 
@@ -122,44 +161,24 @@ Output is small on purpose: that recording yields ~12 key frames, not 3,600.
 python3 tests/test_detection.py
 ```
 
-Every case in there is a bug that actually shipped during development: the
-vanishing spinner, the click swallowed by pointer motion, a compressed
-re-encode moving the reported hang five seconds late and repeating it four
-times, and the self-suppressing noise floor. They run against generated
-fixtures, so there is nothing to download.
-
-## replicate
-
-Rebuilding an interface from a video fails in a predictable way: the static
-parts come out nearly right and the moving parts come out about half right.
-That is not a looking-harder problem — a still frame cannot contain motion,
-so any number of screenshots leaves you guessing at duration, distance and
-easing.
-
-So `replicate` splits a recording into the states it rests in and the
-transitions between them, and treats them differently. States get one clean
-full-resolution frame and a palette. Transitions get sampled densely and
-measured: scale, position, brightness, coverage, blur and colour separation
-per frame, with a CSS `cubic-bezier` fitted and its error reported.
-
-```bash
-python3 scripts/replicate.py clip.mov -o rebuild/
-python3 scripts/replicate.py clip.mov --from 6.3 --to 7.3 -o rebuild/
-```
-
-A poor fit across every channel is a finding rather than a failure: it means
-staged keyframes, a spring, or per-frame shader work, and that no single
-tween will ever match. Edge colour separation is the tell for refraction —
-CSS does not split red from blue at an edge.
+40 checks against generated fixtures. Most are bugs that shipped: the
+vanishing spinner, a click swallowed by pointer motion, a compressed
+re-encode moving a hang five seconds late and reporting it four times,
+phantom scrolls on a blank screen, forty false flashes during one scroll,
+and an ease-out truncated until it read as linear.
 
 ## Limits
 
-- Pixels only. No clicks, keystrokes, network or console — a change where the
-  cursor is, is *consistent with* a click, not proof of one.
+- Pixels only — no clicks, keystrokes, network or console. A change where
+  the cursor is, is consistent with a click, not proof of one.
+- A flash needs settled state either side. One mid-scroll can't be isolated,
+  and back-to-back flickers report as one.
+- Jank detection is whole-page; an inner scrolling panel isn't caught.
+- Easing lands in the right family, not always the exact curve.
+- Sub-pixel detail is gone in a compressed recording. Exact type sizes and
+  1px borders are inference.
 - Tuned for screen recordings. Camera footage and video playback read as
-  continuously busy and produce a thin timeline.
-- Key frames are downscaled to 1280px; re-extract full-size if you need to
-  read small text.
+  continuously busy.
 
 ## License
 

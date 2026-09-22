@@ -38,7 +38,9 @@ import signals as sig_mod    # noqa: E402
 
 SHEET_COL_W = 520
 PAD = 0.12                   # region padding, fraction of its own size
-STATE_STABLE = 0.01          # changed fraction below which the screen rests
+MOVE_HIGH = 0.01             # change needed to declare motion has begun
+MOVE_LOW = 0.0015            # change below which motion has truly finished
+STATE_STABLE = MOVE_LOW      # kept for readability below
 STATE_MIN = 0.25             # seconds before a rest counts as a state
 MOVE_MIN = 0.10              # seconds before motion counts as a transition
 STATE_SAME = 4.0             # thumbnail distance below which states match
@@ -50,23 +52,44 @@ def segment(sig) -> List[dict]:
     Split the recording into states the interface rests in and the
     transitions between them.
 
-    Everything downstream depends on this distinction: a state is fully
-    described by one good frame, and a transition cannot be described by
-    frames at all, only by measurement.
+    Two thresholds, not one. An ease-out spends most of its duration
+    barely moving, so a single "is it still?" test clips the slow tail and
+    keeps only the fast opening -- and a curve truncated to its first third
+    looks linear no matter what it really was. Motion has to cross a high
+    bar to start and fall under a much lower one to be called finished.
     """
-    stable = sig.changed_frac < STATE_STABLE
-    out, i, n = [], 0, len(sig)
+    cf = sig.changed_frac
+    n = len(sig)
+    moving = cf > MOVE_HIGH
+
+    # Grow each burst outwards while anything at all is still changing.
+    live = np.zeros(n, dtype=bool)
+    i = 0
+    while i < n:
+        if not moving[i]:
+            i += 1
+            continue
+        a = i
+        while a > 0 and cf[a - 1] > MOVE_LOW:
+            a -= 1
+        b = i
+        while b + 1 < n and cf[b + 1] > MOVE_LOW:
+            b += 1
+        live[a:b + 1] = True
+        i = b + 1
+
+    out, i = [], 0
     while i < n:
         j = i
-        while j < n and stable[j] == stable[i]:
+        while j < n and live[j] == live[i]:
             j += 1
         t0, t1 = float(sig.t[i]), float(sig.t[min(j, n - 1)])
         span = t1 - t0
-        if stable[i] and span >= STATE_MIN:
-            out.append({"kind": "state", "t0": t0, "t1": t1,
-                        "i0": i, "i1": j - 1})
-        elif not stable[i] and span >= MOVE_MIN:
+        if live[i] and span >= MOVE_MIN:
             out.append({"kind": "transition", "t0": t0, "t1": t1,
+                        "i0": i, "i1": j - 1})
+        elif not live[i] and span >= STATE_MIN:
+            out.append({"kind": "state", "t0": t0, "t1": t1,
                         "i0": i, "i1": j - 1})
         i = j
 
