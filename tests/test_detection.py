@@ -180,6 +180,47 @@ def test_signal_resolution() -> None:
           sig.changed_px[5] == 0, f"changed_px={sig.changed_px[5]}")
 
 
+def test_easing_fit() -> None:
+    print("easing identification")
+    import numpy as np
+    import measure as M
+    x = np.linspace(0, 1, 24)
+    cases = {"cubic-out": 1 - (1 - x) ** 3, "linear": x,
+             "quart-in": x ** 4, "expo-out": 1 - 2 ** (-10 * x)}
+    for expect, curve in cases.items():
+        got = M.fit_easing(curve)
+        check(f"{expect} identified", got and got[0][0] == expect,
+              f"got {got[0][0] if got else None}")
+        check(f"{expect} fits closely", got and got[0][1] < 0.05,
+              f"rmse {got[0][1]:.3f}" if got else "no fit")
+    # A curve no standard easing matches must report a poor fit rather than
+    # confidently naming the least-bad one.
+    bounce = np.abs(np.sin(x * np.pi * 3)) * (1 - x) + x
+    got = M.fit_easing(bounce)
+    check("a non-tween curve reports a poor fit", got and got[0][1] > 0.09,
+          f"rmse {got[0][1]:.3f}" if got else "no fit")
+
+
+def test_segmentation(tmp: str) -> None:
+    print("state / transition segmentation")
+    import replicate as R
+    # Still, then a hard change, then still again.
+    dst = os.path.join(tmp, "states.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "color=c=0x202020:s=480x320:d=4:r=30",
+         "-f", "lavfi", "-i", "color=c=0xE0E0E0:s=300x200:d=4:r=30",
+         "-filter_complex", "[0][1]overlay=90:60:enable='gt(t,2)'",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", dst],
+        check=True)
+    sig = S.extract(dst)
+    segs = R.dedupe_states(sig, R.segment(sig))
+    states = [g for g in segs if g["kind"] == "state"]
+    check("both resting states found", len(states) == 2, f"got {len(states)}")
+    check("the change is not called a state",
+          all(not (g["t0"] < 2.05 < g["t1"]) for g in states))
+
+
 def main() -> int:
     ensure_sample()
     with tempfile.TemporaryDirectory() as tmp:
@@ -189,6 +230,8 @@ def main() -> int:
         test_static(tmp)
         test_transient(tmp)
         test_continuous_motion(tmp)
+        test_easing_fit()
+        test_segmentation(tmp)
     print()
     if FAILED:
         print(f"{len(FAILED)} check(s) failed: {', '.join(FAILED)}")

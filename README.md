@@ -1,6 +1,12 @@
-# watch
+# watch + replicate
 
-**Make coding agents able to read bug reports that are screen recordings.**
+**Make coding agents able to read video.**
+
+Two commands over one codebase:
+
+- **`/watch`** — find bugs in a screen recording. What broke, and when.
+- **`/replicate`** — take an interface apart so it can be rebuilt. States,
+  transitions, and the motion measured frame by frame.
 
 Someone hands you a `.mov` and says "it breaks at 0:14". Your agent can't
 watch it, so you transcribe it into prose by hand and lose half the detail.
@@ -60,9 +66,11 @@ job, and keeping that boundary is what stops it inventing a story.
 ## Install
 
 ```bash
-git clone https://github.com/YOURNAME/claude-watch ~/.claude/skills/watch
-pip install -r requirements.txt   # opencv-python, numpy
+git clone https://github.com/YOURNAME/claude-watch
+cd claude-watch && pip install -r requirements.txt && ./install.sh
 ```
+
+That installs both `/watch` and `/replicate`.
 
 Needs `ffmpeg` on PATH. Optional: `pip install openai-whisper` to transcribe
 narration — people say "and now it just hangs" out loud, and that is often
@@ -119,6 +127,30 @@ vanishing spinner, the click swallowed by pointer motion, a compressed
 re-encode moving the reported hang five seconds late and repeating it four
 times, and the self-suppressing noise floor. They run against generated
 fixtures, so there is nothing to download.
+
+## replicate
+
+Rebuilding an interface from a video fails in a predictable way: the static
+parts come out nearly right and the moving parts come out about half right.
+That is not a looking-harder problem — a still frame cannot contain motion,
+so any number of screenshots leaves you guessing at duration, distance and
+easing.
+
+So `replicate` splits a recording into the states it rests in and the
+transitions between them, and treats them differently. States get one clean
+full-resolution frame and a palette. Transitions get sampled densely and
+measured: scale, position, brightness, coverage, blur and colour separation
+per frame, with a CSS `cubic-bezier` fitted and its error reported.
+
+```bash
+python3 scripts/replicate.py clip.mov -o rebuild/
+python3 scripts/replicate.py clip.mov --from 6.3 --to 7.3 -o rebuild/
+```
+
+A poor fit across every channel is a finding rather than a failure: it means
+staged keyframes, a spring, or per-frame shader work, and that no single
+tween will ever match. Edge colour separation is the tell for refraction —
+CSS does not split red from blue at an edge.
 
 ## Limits
 
