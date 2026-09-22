@@ -1,11 +1,11 @@
-# video-repro
+# watch
 
 **Make coding agents able to read bug reports that are screen recordings.**
 
 Someone hands you a `.mov` and says "it breaks at 0:14". Your agent can't
 watch it, so you transcribe it into prose by hand and lose half the detail.
 
-`video-repro` turns the recording into a timestamped timeline plus a handful
+`watch` turns the recording into a timestamped timeline plus a handful
 of key frames — something any model with vision can actually read.
 
 ```
@@ -60,7 +60,7 @@ job, and keeping that boundary is what stops it inventing a story.
 ## Install
 
 ```bash
-git clone https://github.com/YOURNAME/video-repro
+git clone https://github.com/YOURNAME/claude-watch ~/.claude/skills/watch
 pip install -r requirements.txt   # opencv-python, numpy
 ```
 
@@ -76,9 +76,19 @@ python3 scripts/analyze.py bug.mov -o repro/
 
 Writes `repro/timeline.md`, `repro/frames/`, `repro/events.json`.
 
-As a Claude Code skill, drop the repo in `~/.claude/skills/video-repro/` and
-it triggers on its own whenever a recording comes up. It is plain Markdown
+Installed at `~/.claude/skills/watch/` it triggers on its own whenever a recording comes up. It is plain Markdown
 and images, so it works just as well pasted into any other assistant.
+
+## A page to record
+
+`examples/demo-page.html` is a deliberately faulty settings form, for trying
+the skill on a real recording rather than a synthetic one. It has two planted
+bugs: the country dropdown opens 1.4s after the click with nothing but a focus
+ring in the meantime, and the menu is anchored 7px left of its trigger.
+
+One is temporal and one is spatial, which is the point — the timeline catches
+the stall, and the magnified crop of the changed region is what makes a 7px
+offset visible at all.
 
 ## Try it without a recording
 

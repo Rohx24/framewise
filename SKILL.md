@@ -1,9 +1,9 @@
 ---
-name: video-repro
+name: watch
 description: Read a screen recording of a bug and turn it into a timestamped timeline plus key frames. Use whenever someone attaches or points at a screen recording, screencast, Loom, .mov/.mp4/.webm/.gif of a UI, or says things like "watch this video", "here's a repro video", "it breaks at 0:14", "see the recording", or when a bug report references a video instead of describing the steps. Also use to check a recording of your own UI work for stutters, hangs or broken transitions.
 ---
 
-# video-repro
+# watch
 
 Coding agents are blind to screen recordings. The usual workaround — grab a
 few screenshots at fixed intervals — misses exactly what a recording is for:

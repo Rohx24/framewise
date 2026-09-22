@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-video-repro: turn a screen recording into a readable timeline.
+watch: turn a screen recording into a readable timeline.
 
     python3 scripts/analyze.py bug.mov -o repro/
 
@@ -63,7 +63,7 @@ def transcribe(path: str, model_name: str):
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="video-repro",
+        prog="watch",
         description="Turn a screen recording into a timeline a model can read.",
     )
     ap.add_argument("video", help="path to the recording (.mov/.mp4/.webm/...)")
@@ -121,8 +121,9 @@ def main() -> int:
                         "region": [round(v, 4) for v in e.region]
                         if e.region else None}
                        for e in evs],
-            "frames": [{"t": round(t, 3), "label": lab, "path": p}
-                       for t, lab, p in frames],
+            "frames": [{"t": round(t, 3), "label": lab, "path": p,
+                        "closeup": z}
+                       for t, lab, p, z in frames],
         }, fh, indent=2)
 
     print(f"\nwrote {md_path}", file=sys.stderr)
