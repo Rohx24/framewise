@@ -127,6 +127,37 @@ def test_static(tmp: str) -> None:
     check("no hang claimed", hangs(notes) == 0)
     check("says nothing happened",
           any("nothing happened" in n.lower() for n in notes))
+    # Phase correlation returns arbitrary offsets on a featureless frame,
+    # which invented a scroll spanning the whole recording.
+    check("no phantom scroll on a blank screen",
+          not any(e.kind == "scroll" for e in evs))
+
+
+def test_transient(tmp: str) -> None:
+    print("three-frame flash of a different state")
+    dst = os.path.join(tmp, "flash.mp4")
+    # Red then green of near-identical luminance: invisible in grayscale,
+    # which is how error -> success used to pass through undetected.
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "lavfi", "-i", "color=c=0xF5F6F8:s=640x480:d=4:r=30",
+         "-f", "lavfi", "-i", "color=c=0xE04B4A:s=400x60:d=4:r=30",
+         "-f", "lavfi", "-i", "color=c=0x20A06E:s=400x60:d=4:r=30",
+         "-filter_complex",
+         "[0][1]overlay=120:100:enable='between(t,2.0,2.1)'[a];"
+         "[a][2]overlay=120:100:enable='gt(t,2.1)'",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", dst],
+        check=True)
+    _, evs, notes = analyse(dst)
+    tr = [e for e in evs if e.kind == "transient"]
+    check("the flash is detected", len(tr) == 1, f"got {len(tr)}")
+    if tr:
+        check("flash is timed correctly", abs(tr[0].t0 - 2.0) < 0.15,
+              f"t0={tr[0].t0:.2f}")
+        check("flash duration is about 0.1s", tr[0].duration < 0.35,
+              f"{tr[0].duration:.2f}s")
+    check("a flash finding is reported",
+          any(n.lstrip("*").lower().startswith("a state flashed") for n in notes))
 
 
 def test_continuous_motion(tmp: str) -> None:
@@ -156,6 +187,7 @@ def main() -> int:
         test_clean()
         test_compressed(tmp)
         test_static(tmp)
+        test_transient(tmp)
         test_continuous_motion(tmp)
     print()
     if FAILED:

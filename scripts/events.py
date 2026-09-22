@@ -31,6 +31,7 @@ POINTER_SPEED = 0.004    # normalised centroid travel/frame that reads as motion
 POINTER_MAX_PX = 800.0   # a pointer is cursor-sized; bigger is a real repaint
 POINTER_MIN_TRAVEL = 0.03  # net displacement before we call it movement
 SCROLL_DY = 1.5          # px of vertical translation per frame
+SCROLL_MIN_CHANGE = 0.005  # a real scroll repaints at least this much
 LUMA_JUMP = 12.0         # brightness step that reads as a flash
 
 TRANSIENT_MAX = 0.60     # a change that reverts slower than this is a real state
@@ -218,7 +219,13 @@ def detect(sig: Signals) -> List[Event]:
 
     # -- scrolling ---------------------------------------------------------
     dy = sig.shift[:, 1]
-    scrolling = _rolling((np.abs(dy) > SCROLL_DY).astype(np.float32), 3) > 0.5
+    # Phase correlation is undefined on a featureless frame and returns
+    # arbitrary offsets, so a blank screen reported a scroll running the
+    # whole length of the recording while the stillness detector correctly
+    # said not one pixel had moved. Translation only counts as scrolling
+    # when pixels actually changed.
+    moved = (np.abs(dy) > SCROLL_DY) & (sig.changed_frac > SCROLL_MIN_CHANGE)
+    scrolling = _rolling(moved.astype(np.float32), 3) > 0.5
     for a, b in _runs(scrolling):
         if sig.t[b - 1] - sig.t[a] < 0.25:
             continue
